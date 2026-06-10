@@ -7,6 +7,7 @@ using Avalonia.Controls;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Egl;
 using Avalonia.OpenGL.Surfaces;
+using Avalonia.Win32.Interop;
 
 namespace Avalonia.Win32.DirectX
 {
@@ -15,6 +16,9 @@ namespace Avalonia.Win32.DirectX
         private DxgiConnection _connection;
         private EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo _window;
         private DxgiRenderTarget? _renderTarget;
+
+        // Windows 11 22H2+ (build 22621) supports DWMWA_SYSTEMBACKDROP_TYPE for Mica
+        private static readonly Version MinMicaVersion = new(10, 0, 22621);
 
         public DxgiSwapchainWindow(DxgiConnection connection, EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo window)
         {
@@ -36,11 +40,57 @@ namespace Avalonia.Win32.DirectX
         }
 
         public bool IsBlurSupported(BlurEffect effect)
-            => effect == BlurEffect.None;
+            => effect switch
+            {
+                BlurEffect.None => true,
+                BlurEffect.Acrylic or BlurEffect.MicaLight or BlurEffect.MicaDark
+                    => Win32Platform.WindowsVersion >= MinMicaVersion,
+                _ => false
+            };
 
-        public void SetBlur(BlurEffect enable)
+        public unsafe void SetBlur(BlurEffect enable)
         {
-            // do nothing
+            var hwnd = _window.Handle;
+            int backdropType;
+
+            switch (enable)
+            {
+                case BlurEffect.Acrylic:
+                    backdropType = (int)UnmanagedMethods.DwmSystemBackdropType.DWMSBT_TABBEDWINDOW;
+                    DwmSetWindowAttribute(hwnd, backdropType);
+                    break;
+
+                case BlurEffect.MicaLight:
+                    backdropType = (int)UnmanagedMethods.DwmSystemBackdropType.DWMSBT_MAINWINDOW;
+                    DwmSetWindowAttribute(hwnd, backdropType);
+                    var pvLightMode = 0;
+                    _ = UnmanagedMethods.DwmSetWindowAttribute(hwnd,
+                        (int)UnmanagedMethods.DwmWindowAttribute.DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &pvLightMode, sizeof(int));
+                    break;
+
+                case BlurEffect.MicaDark:
+                    backdropType = (int)UnmanagedMethods.DwmSystemBackdropType.DWMSBT_MAINWINDOW;
+                    DwmSetWindowAttribute(hwnd, backdropType);
+                    var pvDarkMode = 1;
+                    _ = UnmanagedMethods.DwmSetWindowAttribute(hwnd,
+                        (int)UnmanagedMethods.DwmWindowAttribute.DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &pvDarkMode, sizeof(int));
+                    break;
+
+                case BlurEffect.None:
+                default:
+                    backdropType = (int)UnmanagedMethods.DwmSystemBackdropType.DWMSBT_AUTO;
+                    DwmSetWindowAttribute(hwnd, backdropType);
+                    break;
+            }
+        }
+
+        private static unsafe void DwmSetWindowAttribute(IntPtr hwnd, int backdropType)
+        {
+            _ = UnmanagedMethods.DwmSetWindowAttribute(hwnd,
+                (int)UnmanagedMethods.DwmWindowAttribute.DWMWA_SYSTEMBACKDROP_TYPE,
+                &backdropType, sizeof(int));
         }
 
         public void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)

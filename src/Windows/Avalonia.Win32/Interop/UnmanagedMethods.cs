@@ -858,6 +858,7 @@ namespace Avalonia.Win32.Interop
             DWMWA_CAPTION_COLOR,
             DWMWA_TEXT_COLOR,
             DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            DWMWA_SYSTEMBACKDROP_TYPE = 38,
             DWMWA_LAST
         };
 
@@ -867,6 +868,15 @@ namespace Avalonia.Win32.Interop
             DWMWCP_DONOTROUND,
             DWMWCP_ROUND,
             DWMWCP_ROUNDSMALL
+        }
+
+        public enum DwmSystemBackdropType : uint
+        {
+            DWMSBT_AUTO = 0,
+            DWMSBT_NONE = 1,
+            DWMSBT_MAINWINDOW = 2,
+            DWMSBT_TABBEDWINDOW = 3,
+            DWMSBT_THUMBNAIL = 4
         }
 
         public enum DwmNCRenderingPolicy : uint
