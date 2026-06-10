@@ -1,0 +1,759 @@
+diff --git a/samples/RenderDemo/MainWindow.xaml b/samples/RenderDemo/MainWindow.xaml
+index e1dbd20b074..e16791b894e 100644
+--- a/samples/RenderDemo/MainWindow.xaml
++++ b/samples/RenderDemo/MainWindow.xaml
+@@ -43,6 +43,8 @@
+         </MenuItem>
+         <MenuItem Header="Tests">
+           <MenuItem Command="{Binding ResizeWindow}" Header="Resize window" />
++          <MenuItem x:Name="SetNotTransparencyMenuItem" Header="Set window not Transparency" Click="SetNotTransparencyMenuItem_OnClick"/>
++          <MenuItem x:Name="SetTransparencyMenuItem" Header="Set window Transparency" Click="SetTransparencyMenuItem_OnClick"/>
+         </MenuItem>
+       </MenuFlyout>
+     </FlyoutBase.AttachedFlyout>
+diff --git a/samples/RenderDemo/MainWindow.xaml.cs b/samples/RenderDemo/MainWindow.xaml.cs
+index a2f3f0eac82..96e21f0d2f9 100644
+--- a/samples/RenderDemo/MainWindow.xaml.cs
++++ b/samples/RenderDemo/MainWindow.xaml.cs
+@@ -1,6 +1,7 @@
+ using System;
+ using System.Linq.Expressions;
+ using Avalonia.Controls;
++using Avalonia.Interactivity;
+ using Avalonia.Markup.Xaml;
+ using Avalonia.Rendering;
+ using RenderDemo.ViewModels;
+@@ -37,5 +38,15 @@ private void InitializeComponent()
+         {
+             AvaloniaXamlLoader.Load(this);
+         }
++
++        private void SetNotTransparencyMenuItem_OnClick(object? sender, RoutedEventArgs e)
++        {
++            TransparencyLevelHint = [WindowTransparencyLevel.None];
++        }
++
++        private void SetTransparencyMenuItem_OnClick(object? sender, RoutedEventArgs e)
++        {
++            TransparencyLevelHint = [WindowTransparencyLevel.Transparent];
++        }
+     }
+ }
+diff --git a/src/Avalonia.Controls/TopLevel.cs b/src/Avalonia.Controls/TopLevel.cs
+index 8556d03d914..9784b10c4c2 100644
+--- a/src/Avalonia.Controls/TopLevel.cs
++++ b/src/Avalonia.Controls/TopLevel.cs
+@@ -203,9 +203,9 @@ internal TopLevel(ITopLevelImpl impl, IAvaloniaDependencyResolver? dependencyRes
+ 
+             _scaling = ValidateScaling(impl.RenderScaling);
+             _actualTransparencyLevel = PlatformImpl.TransparencyLevel;
++            
+ 
+-
+-
++            
+ 
+             _accessKeyHandler = TryGetService<IAccessKeyHandler>(dependencyResolver);
+             _inputManager = TryGetService<IInputManager>(dependencyResolver);
+diff --git a/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindow.cs b/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindow.cs
+index 8935e8bcbff..de8caa85ccd 100644
+--- a/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindow.cs
++++ b/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindow.cs
+@@ -1,6 +1,6 @@
+ ﻿using System;
+-using System.Numerics;
+ using System.Threading;
++using Avalonia.Controls;
+ using Avalonia.OpenGL.Egl;
+ using Avalonia.Reactive;
+ using MicroCom.Runtime;
+@@ -51,4 +51,13 @@ public IDisposable BeginTransaction()
+             Monitor.Exit(_shared.SyncRoot);
+         });
+     }
++
++    public bool IsTransparency => _transparencyLevel != WindowTransparencyLevel.None;
++
++    public void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)
++    {
++        _transparencyLevel = transparencyLevel;
++    }
++
++    private WindowTransparencyLevel _transparencyLevel;
+ }
+diff --git a/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindowSurface.cs b/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindowSurface.cs
+index d0651e08eec..15e0f60c3ce 100644
+--- a/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindowSurface.cs
++++ b/src/Windows/Avalonia.Win32/DComposition/DirectCompositedWindowSurface.cs
+@@ -1,9 +1,15 @@
+ ﻿using System;
+ using System.ComponentModel;
++using System.Diagnostics.CodeAnalysis;
++
++using Avalonia.Controls;
++using Avalonia.Controls.Shapes;
+ using Avalonia.OpenGL.Egl;
+ using Avalonia.Platform;
+ using Avalonia.Win32.DirectX;
+ using Avalonia.Win32.Interop;
++using Avalonia.Win32.WinRT;
++
+ using MicroCom.Runtime;
+ 
+ namespace Avalonia.Win32.DComposition;
+@@ -25,6 +31,7 @@ public IDirect3D11TextureRenderTarget CreateRenderTarget(IPlatformGraphicsContex
+     {
+         _window ??= new DirectCompositedWindow(_info, _shared);
+         SetBlur(_blurEffect);
++        _window.SetTransparencyLevel(_windowTransparencyLevel);
+ 
+         return new DirectCompositedWindowRenderTarget(context, d3dDevice, _shared, _window);
+     }
+@@ -43,6 +50,14 @@ public void SetBlur(BlurEffect enable)
+         _blurEffect = enable;
+         // _window?.SetBlur(enable);
+     }
++
++    public void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)
++    {
++        _windowTransparencyLevel = transparencyLevel;
++        _window?.SetTransparencyLevel(transparencyLevel);
++    }
++
++    private WindowTransparencyLevel _windowTransparencyLevel;
+ }
+ 
+ internal class DirectCompositedWindowRenderTarget : IDirect3D11TextureRenderTarget
+@@ -50,11 +65,13 @@ internal class DirectCompositedWindowRenderTarget : IDirect3D11TextureRenderTarg
+     private static readonly Guid IID_ID3D11Texture2D = Guid.Parse("6f15aaf2-d208-4e89-9ab4-489535d34f9c");
+ 
+     private readonly IPlatformGraphicsContext _context;
++    private readonly DirectCompositionShared _shared;
+     private readonly DirectCompositedWindow _window;
+-    private readonly IDCompositionVirtualSurface _surface;
++    private IDCompositionVirtualSurface _surface;
+     private bool _lost;
+     private PixelSize _size;
+     private readonly IUnknown _d3dDevice;
++    private bool _isSurfaceSupportTransparency;
+ 
+     public DirectCompositedWindowRenderTarget(
+         IPlatformGraphicsContext context, IntPtr d3dDevice,
+@@ -63,13 +80,25 @@ public DirectCompositedWindowRenderTarget(
+         _d3dDevice = MicroComRuntime.CreateProxyFor<IUnknown>(d3dDevice, false).CloneReference();
+ 
+         _context = context;
++        _shared = shared;
+         _window = window;
+ 
+-        using (var surfaceFactory = shared.Device.CreateSurfaceFactory(_d3dDevice))
+-        {
+-            _surface = surfaceFactory.CreateVirtualSurface(1, 1, DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM,
+-                DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_PREMULTIPLIED);
+-        }
++        CreateSurface(window);
++    }
++
++    [MemberNotNull(nameof(_surface))]
++    private void CreateSurface(DirectCompositedWindow window)
++    {
++        using var surfaceFactory = _shared.Device.CreateSurfaceFactory(_d3dDevice);
++
++        const uint initialSize = 1;
++        var alphaMode = window.IsTransparency ?
++            DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_PREMULTIPLIED :
++            DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_IGNORE;
++        _isSurfaceSupportTransparency = window.IsTransparency;
++
++        _surface = surfaceFactory.CreateVirtualSurface(initialSize, initialSize, DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM,
++            alphaMode);
+     }
+ 
+     public void Dispose()
+@@ -88,9 +117,19 @@ public unsafe IDirect3D11TextureRenderTargetRenderSession BeginDraw()
+         bool needsEndDraw = false;
+         try
+         {
++            bool forceResize = false;
++            if (_window.IsTransparency != _isSurfaceSupportTransparency)
++            {
++                _surface.Dispose();
++
++                CreateSurface(_window);
++
++                forceResize = true;
++            }
++
+             var size = _window.WindowInfo.Size;
+             var scale = _window.WindowInfo.Scaling;
+-            if (_size != size)
++            if (forceResize || _size != size)
+             {
+                 _surface.Resize((ushort)size.Width, (ushort)size.Height);
+                 _size = size;
+diff --git a/src/Windows/Avalonia.Win32/DirectX/DxgiConnection.cs b/src/Windows/Avalonia.Win32/DirectX/DxgiConnection.cs
+index 678b15e0d79..caf7aa5d64d 100644
+--- a/src/Windows/Avalonia.Win32/DirectX/DxgiConnection.cs
++++ b/src/Windows/Avalonia.Win32/DirectX/DxgiConnection.cs
+@@ -216,7 +216,16 @@ private static bool TryCreateAndRegisterCore()
+             return tcs.Task.Result;
+         }
+ 
+-        public bool RequiresNoRedirectionBitmap => false;
++        public bool RequiresNoRedirectionBitmap => IsTransparencySupported() 
++            ? true 
++            : false;
++
+         public IPlatformRenderSurface CreateSurface(EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo info) => new DxgiSwapchainWindow(this, info);
++
++        public static bool IsTransparencySupported()
++        {
++            // We can use the DirectComposited+CreateSwapChainForComposition to create the Transparency window.
++            return Win32Platform.WindowsVersion >= PlatformConstants.Windows8_1;
++        }
+     }
+ }
+diff --git a/src/Windows/Avalonia.Win32/DirectX/DxgiRenderTarget.cs b/src/Windows/Avalonia.Win32/DirectX/DxgiRenderTarget.cs
+index 4ff5596269f..7900c82139a 100644
+--- a/src/Windows/Avalonia.Win32/DirectX/DxgiRenderTarget.cs
++++ b/src/Windows/Avalonia.Win32/DirectX/DxgiRenderTarget.cs
+@@ -1,10 +1,16 @@
+ ﻿using System;
++using System.ComponentModel;
++using System.Diagnostics.CodeAnalysis;
++
++using Avalonia.Controls;
+ using Avalonia.OpenGL.Egl;
+ using Avalonia.OpenGL.Surfaces;
+ using Avalonia.Platform;
++using Avalonia.Win32.DComposition;
++using Avalonia.Win32.Interop;
+ using Avalonia.Win32.OpenGl.Angle;
++
+ using MicroCom.Runtime;
+-using static Avalonia.Win32.Interop.UnmanagedMethods;
+ 
+ namespace Avalonia.Win32.DirectX
+ {
+@@ -18,18 +24,21 @@ internal unsafe class DxgiRenderTarget : EglPlatformSurfaceRenderTargetBase
+         private readonly EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo _window;
+         private readonly DxgiConnection _connection;
+         private readonly IDXGIDevice? _dxgiDevice;
+-        private readonly IDXGIFactory2? _dxgiFactory;
+-        private readonly IDXGISwapChain1? _swapChain;
+-        private readonly uint _flagsUsed;
++        private readonly IDXGIFactory2 _dxgiFactory;
++        private IDXGISwapChain1? _swapChain;
++        private DXGI_SWAP_CHAIN_FLAG _dxgiSwapChainDescFlagsUsed;
++        private const uint SwapChainDescBufferCount = 2;
+ 
+         private IUnknown? _renderTexture;
+-        private RECT _clientRect;
++        private PixelSize _size;
+         private EglSurface? _surface;
+ 
+-        public DxgiRenderTarget(EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo window, EglContext context, DxgiConnection connection) : base(context)
++        public DxgiRenderTarget(EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo window, EglContext context,
++            DxgiConnection connection, WindowTransparencyLevel transparencyLevel) : base(context)
+         {
+             _window = window;
+             _connection = connection;
++            _transparencyLevel = transparencyLevel;
+ 
+             // the D3D device is expected to at least be an ID3D11Device 
+             // but how do I wrap an IntPtr as a managed IUnknown now? Like this. 
+@@ -44,6 +53,35 @@ public DxgiRenderTarget(EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo win
+                 _dxgiFactory = MicroComRuntime.CreateProxyFor<IDXGIFactory2>(adapterPointer.GetParent(&factoryGuid), true);
+             }
+ 
++            CreateSurface(window.Size);
++
++            _dxgiFactory.MakeWindowAssociation(window.Handle, (uint)(DXGI_MWA.DXGI_MWA_NO_ALT_ENTER | DXGI_MWA.DXGI_MWA_NO_PRINT_SCREEN));
++        }
++
++        private IDCompositionDesktopDevice? _compositionDesktopDevice;
++        private IDCompositionTarget? _compositionTarget;
++
++        [MemberNotNull(nameof(_swapChain))]
++        private void CreateSurface(PixelSize expectedPixelSize)
++        {
++            _swapChain?.Dispose();
++            _swapChain = null;
++
++            _compositionDesktopDevice?.Dispose();
++            _compositionDesktopDevice = null;
++
++            _compositionTarget?.Dispose();
++            _compositionTarget = null;
++
++            _surface?.Dispose();
++            _surface = null;
++
++            _renderTexture?.Dispose();
++            _renderTexture = null;
++
++            var windowInfo = _window;
++            var size = expectedPixelSize;
++
+             DXGI_SWAP_CHAIN_DESC1 dxgiSwapChainDesc = new DXGI_SWAP_CHAIN_DESC1();
+ 
+             // standard swap chain really. 
+@@ -52,34 +90,56 @@ public DxgiRenderTarget(EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo win
+             dxgiSwapChainDesc.SampleDesc.Quality = 0U;
+             dxgiSwapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+             dxgiSwapChainDesc.AlphaMode = DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_IGNORE;
+-            dxgiSwapChainDesc.Width = (uint)_window.Size.Width;
+-            dxgiSwapChainDesc.Height = (uint)_window.Size.Height;
+-            dxgiSwapChainDesc.BufferCount = 2U;
++            dxgiSwapChainDesc.Width = (uint)size.Width;
++            dxgiSwapChainDesc.Height = (uint)size.Height;
++            dxgiSwapChainDesc.BufferCount = SwapChainDescBufferCount;
+             dxgiSwapChainDesc.SwapEffect = DXGI_SWAP_EFFECT.DXGI_SWAP_EFFECT_FLIP_DISCARD;
+ 
+-            // okay I know this looks bad, but we're hitting our render-calls by awaiting via dxgi 
+-            // this is done in the DxgiConnection itself 
+-            _flagsUsed = dxgiSwapChainDesc.Flags = (uint)(DXGI_SWAP_CHAIN_FLAG.DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
++            _dxgiSwapChainDescFlagsUsed = DXGI_SWAP_CHAIN_FLAG.DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
++            dxgiSwapChainDesc.Flags = (uint)_dxgiSwapChainDescFlagsUsed;
+ 
+-            _swapChain = _dxgiFactory.CreateSwapChainForHwnd
+-            (
++            if (IsTransparency && DxgiConnection.IsTransparencySupported())
++            {
++                dxgiSwapChainDesc.AlphaMode = DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_PREMULTIPLIED;
++
++                _swapChain = _dxgiFactory.CreateSwapChainForComposition(_dxgiDevice, &dxgiSwapChainDesc, null);
++
++                Guid IID_IDCompositionDesktopDevice = Guid.Parse("5f4633fe-1e08-4cb8-8c75-ce24333f5602");
++                var result = NativeMethods.DCompositionCreateDevice2(default, IID_IDCompositionDesktopDevice, out var cDevice);
++                if (result != UnmanagedMethods.HRESULT.S_OK)
++                {
++                    throw new Win32Exception((int)result);
++                }
++
++                var device = MicroComRuntime.CreateProxyFor<IDCompositionDesktopDevice>(cDevice, ownsHandle: true);
++                _compositionDesktopDevice = device;
++                using IDCompositionVisual compositionVisual =
++                    device.CreateTargetForHwnd(windowInfo.Handle, topmost: true);
++                var compositionTarget = compositionVisual.QueryInterface<IDCompositionTarget>();
++                _compositionTarget = compositionTarget;
++                IDCompositionVisual container = device.CreateVisual();
++                container.SetContent(_swapChain);
++                compositionTarget.SetRoot(container);
++                device.Commit();
++            }
++            else
++            {
++                _swapChain = _dxgiFactory.CreateSwapChainForHwnd
++                (
+                     _dxgiDevice,
+-                    window.Handle,
++                    windowInfo.Handle,
+                     &dxgiSwapChainDesc,
+                     null,
+                     null
+-            );
+-
+-            _dxgiFactory.MakeWindowAssociation(window.Handle, (uint)(DXGI_MWA.DXGI_MWA_NO_ALT_ENTER | DXGI_MWA.DXGI_MWA_NO_PRINT_SCREEN));
++                );
++            }
+ 
+-            GetClientRect(_window.Handle, out var pClientRect);
+-            _clientRect = pClientRect;
++            _size = size;
+         }
+ 
+         /// <inheritdoc />
+         public override IGlPlatformSurfaceRenderingSession BeginDrawCore(IRenderTarget.RenderTargetSceneInfo sceneInfo)
+         {
+-            // TODO: use expectedPixelSize
+             if (_swapChain is null)
+             {
+                 throw new InvalidOperationException("No chain to draw on");
+@@ -90,12 +150,20 @@ public override IGlPlatformSurfaceRenderingSession BeginDrawCore(IRenderTarget.R
+             var success = false;
+             try
+             {
+-                GetClientRect(_window.Handle, out var pClientRect);
+-                if (!RectsEqual(pClientRect, _clientRect))
++                var size = sceneInfo.Size;
++                var scale = sceneInfo.Scaling;
++
++                var shouldTransparency = IsTransparency && DxgiConnection.IsTransparencySupported();
++                var isSupportTransparency = _swapChain.Desc1.AlphaMode is DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_PREMULTIPLIED or DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_STRAIGHT;
++
++                if (shouldTransparency != isSupportTransparency)
+                 {
+-                    // we gotta resize 
+-                    _clientRect = pClientRect;
++                    CreateSurface(size);
++                }
+ 
++                if (_size != size)
++                {
++                    // we gotta resize
+                     if (_renderTexture is not null)
+                     {
+                         _surface?.Dispose();
+@@ -105,16 +173,14 @@ public override IGlPlatformSurfaceRenderingSession BeginDrawCore(IRenderTarget.R
+                         _renderTexture = null;
+                     }
+ 
+-                    _swapChain.ResizeBuffers(2,
+-                        (ushort)(pClientRect.right - pClientRect.left),
+-                        (ushort)(pClientRect.bottom - pClientRect.top),
++                    _swapChain.ResizeBuffers(SwapChainDescBufferCount,
++                        (ushort)size.Width, (ushort)size.Height,
+                         DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM,
+-                        (ushort)_flagsUsed
++                        (uint)_dxgiSwapChainDescFlagsUsed
+                         );
++                    _size = size;
+                 }
+ 
+-                var size = _window.Size;
+-
+                 // Get swapchain texture here 
+                 var texture = _renderTexture;
+                 if (texture is null)
+@@ -134,7 +200,7 @@ public override IGlPlatformSurfaceRenderingSession BeginDrawCore(IRenderTarget.R
+                         0, 0, size.Width, size.Height);
+                 }
+ 
+-                var res = base.BeginDraw(_surface, _window.Size, _window.Scaling, () =>
++                var res = base.BeginDraw(_surface, size, scale, () =>
+                 {
+                     _swapChain.Present((ushort)0U, (ushort)0U);
+                     transaction?.Dispose();
+@@ -168,15 +234,18 @@ public override void Dispose()
+             _swapChain?.Dispose();
+             _surface?.Dispose();
+             _renderTexture?.Dispose();
++
++            _compositionDesktopDevice?.Dispose();
++            _compositionTarget?.Dispose();
+         }
+ 
+-        internal static bool RectsEqual(in RECT l, in RECT r)
++        public bool IsTransparency => _transparencyLevel != WindowTransparencyLevel.None;
++
++        public void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)
+         {
+-            return (l.left == r.left)
+-                && (l.top == r.top)
+-                && (l.right == r.right)
+-                && (l.bottom == r.bottom);
++            _transparencyLevel = transparencyLevel;
+         }
+ 
++        private WindowTransparencyLevel _transparencyLevel;
+     }
+ }
+diff --git a/src/Windows/Avalonia.Win32/DirectX/DxgiSwapchainWindow.cs b/src/Windows/Avalonia.Win32/DirectX/DxgiSwapchainWindow.cs
+index a4c6598473a..b57f3e6214e 100644
+--- a/src/Windows/Avalonia.Win32/DirectX/DxgiSwapchainWindow.cs
++++ b/src/Windows/Avalonia.Win32/DirectX/DxgiSwapchainWindow.cs
+@@ -3,16 +3,18 @@
+ using System.Linq;
+ using System.Text;
+ using System.Threading.Tasks;
++using Avalonia.Controls;
+ using Avalonia.OpenGL;
+ using Avalonia.OpenGL.Egl;
+ using Avalonia.OpenGL.Surfaces;
+ 
+ namespace Avalonia.Win32.DirectX
+ {
+-    internal class DxgiSwapchainWindow : EglGlPlatformSurfaceBase
++    internal class DxgiSwapchainWindow : EglGlPlatformSurfaceBase, ICompositionEffectsSurface, IDisposable
+     {
+         private DxgiConnection _connection;
+         private EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo _window;
++        private DxgiRenderTarget? _renderTarget;
+ 
+         public DxgiSwapchainWindow(DxgiConnection connection, EglGlPlatformSurface.IEglWindowGlPlatformSurfaceInfo window)
+         {
+@@ -22,11 +24,37 @@ public DxgiSwapchainWindow(DxgiConnection connection, EglGlPlatformSurface.IEglW
+ 
+         public override IGlPlatformSurfaceRenderTarget CreateGlRenderTarget(IGlContext context)
+         {
++            _renderTarget?.Dispose();
++
+             var eglContext = (EglContext)context;
+             using (eglContext.EnsureCurrent())
+             {
+-                return new DxgiRenderTarget(_window, eglContext, _connection);
++                _renderTarget = new DxgiRenderTarget(_window, eglContext, _connection, _windowTransparencyLevel);
+             }
++
++            return _renderTarget;
++        }
++
++        public bool IsBlurSupported(BlurEffect effect)
++            => effect == BlurEffect.None;
++
++        public void SetBlur(BlurEffect enable)
++        {
++            // do nothing
++        }
++
++        public void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)
++        {
++            _windowTransparencyLevel = transparencyLevel;
++            _renderTarget?.SetTransparencyLevel(transparencyLevel);
++        }
++
++        private WindowTransparencyLevel _windowTransparencyLevel;
++
++        public void Dispose()
++        {
++            _renderTarget?.Dispose();
++            _renderTarget = null;
+         }
+     }
+ }
+diff --git a/src/Windows/Avalonia.Win32/IBlurHost.cs b/src/Windows/Avalonia.Win32/IBlurHost.cs
+index fcaf58eaacd..1b5dd9c9b44 100644
+--- a/src/Windows/Avalonia.Win32/IBlurHost.cs
++++ b/src/Windows/Avalonia.Win32/IBlurHost.cs
+@@ -1,4 +1,6 @@
+-﻿namespace Avalonia.Win32;
++﻿using Avalonia.Controls;
++
++namespace Avalonia.Win32;
+ 
+ internal enum BlurEffect
+ {
+@@ -14,4 +16,5 @@ internal interface ICompositionEffectsSurface
+     bool IsBlurSupported(BlurEffect effect);
+ 
+     void SetBlur(BlurEffect enable);
++    void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel);
+ }
+diff --git a/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindow.cs b/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindow.cs
+index d720e525d3a..4bade8530a7 100644
+--- a/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindow.cs
++++ b/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindow.cs
+@@ -1,6 +1,7 @@
+ ﻿using System;
+ using System.Numerics;
+ using System.Threading;
++using Avalonia.Controls;
+ using Avalonia.OpenGL.Egl;
+ using Avalonia.Reactive;
+ using MicroCom.Runtime;
+@@ -112,4 +113,13 @@ public void ResizeIfNeeded(PixelSize size)
+             }
+         }
+     }
++
++    public bool IsTransparency => _transparencyLevel != WindowTransparencyLevel.None;
++
++    public void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)
++    {
++        _transparencyLevel = transparencyLevel;
++    }
++
++    private WindowTransparencyLevel _transparencyLevel;
+ }
+diff --git a/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindowSurface.cs b/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindowSurface.cs
+index 2addbc65248..ee4c326fd67 100644
+--- a/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindowSurface.cs
++++ b/src/Windows/Avalonia.Win32/WinRT/Composition/WinUiCompositedWindowSurface.cs
+@@ -1,4 +1,6 @@
+ ﻿using System;
++using System.Diagnostics.CodeAnalysis;
++using Avalonia.Controls;
+ using Avalonia.OpenGL.Egl;
+ using Avalonia.Platform;
+ using Avalonia.Win32.DirectX;
+@@ -26,6 +28,7 @@ public IDirect3D11TextureRenderTarget CreateRenderTarget(IPlatformGraphicsContex
+                 ?.WinUICompositionBackdropCornerRadius;
+             _window ??= new WinUiCompositedWindow(_info, _shared, cornerRadius);
+             _window.SetBlur(_blurEffect);
++            _window.SetTransparencyLevel(_windowTransparencyLevel);
+ 
+             return new WinUiCompositedWindowRenderTarget(context, _window, d3dDevice, _shared.Compositor);
+         }
+@@ -50,6 +53,14 @@ public void SetBlur(BlurEffect enable)
+             _blurEffect = enable;
+             _window?.SetBlur(enable);
+         }
++
++        public void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)
++        {
++            _windowTransparencyLevel = transparencyLevel;
++            _window?.SetTransparencyLevel(transparencyLevel);
++        }
++
++        private WindowTransparencyLevel _windowTransparencyLevel;
+     }
+ 
+     internal class WinUiCompositedWindowRenderTarget : IDirect3D11TextureRenderTarget
+@@ -63,11 +74,11 @@ internal class WinUiCompositedWindowRenderTarget : IDirect3D11TextureRenderTarge
+         private readonly ICompositorInterop _interop;
+         private readonly ICompositionGraphicsDevice _compositionDevice;
+         private readonly ICompositionGraphicsDevice2 _compositionDevice2;
+-        private readonly ICompositionSurface _surface;
++        private ICompositionSurface _surface;
+         private PixelSize _size;
+         private bool _lost;
+-        private readonly ICompositionDrawingSurfaceInterop _surfaceInterop;
+-        private readonly ICompositionDrawingSurface _drawingSurface;
++        private ICompositionDrawingSurfaceInterop _surfaceInterop;
++        private ICompositionDrawingSurface _drawingSurface;
+ 
+         public WinUiCompositedWindowRenderTarget(IPlatformGraphicsContext context,
+             WinUiCompositedWindow window, IntPtr device,
+@@ -83,10 +94,8 @@ public WinUiCompositedWindowRenderTarget(IPlatformGraphicsContext context,
+                 _interop = compositor.QueryInterface<ICompositorInterop>();
+                 _compositionDevice = _interop.CreateGraphicsDevice(_d3dDevice);
+                 _compositionDevice2 = _compositionDevice.QueryInterface<ICompositionGraphicsDevice2>();
+-                _drawingSurface = _compositionDevice2.CreateDrawingSurface2(new UnmanagedMethods.SIZE(),
+-                    DirectXPixelFormat.B8G8R8A8UIntNormalized, DirectXAlphaMode.Premultiplied);
+-                _surface = _drawingSurface.QueryInterface<ICompositionSurface>();
+-                _surfaceInterop = _drawingSurface.QueryInterface<ICompositionDrawingSurfaceInterop>();
++
++                CreateSurface(window);
+             }
+             catch
+             {
+@@ -102,6 +111,17 @@ public WinUiCompositedWindowRenderTarget(IPlatformGraphicsContext context,
+             }
+         }
+ 
++        [MemberNotNull(nameof(_drawingSurface), nameof(_surface), nameof(_surfaceInterop))]
++        private void CreateSurface(WinUiCompositedWindow window)
++        {
++            // Do not use Premultiplied when the window is not Transparency. Because the Premultiplied AlphaMode will increase the performance loss of DWM. See https://github.com/AvaloniaUI/Avalonia/issues/20643
++            var alphaMode = window.IsTransparency ? DirectXAlphaMode.Premultiplied : DirectXAlphaMode.Ignore;
++            _drawingSurface = _compositionDevice2.CreateDrawingSurface2(new UnmanagedMethods.SIZE(),
++                DirectXPixelFormat.B8G8R8A8UIntNormalized, alphaMode);
++            _surface = _drawingSurface.QueryInterface<ICompositionSurface>();
++            _surfaceInterop = _drawingSurface.QueryInterface<ICompositionDrawingSurfaceInterop>();
++        }
++
+         public void Dispose()
+         {
+             _surface.Dispose();
+@@ -121,9 +141,25 @@ public unsafe IDirect3D11TextureRenderTargetRenderSession BeginDraw()
+             if (IsCorrupted)
+                 throw new RenderTargetCorruptedException();
+             var transaction = _window.BeginTransaction();
++
+             bool needsEndDraw = false;
+             try
+             {
++                bool forceResize = false;
++                var supportTransparency = _drawingSurface.AlphaMode == DirectXAlphaMode.Premultiplied;
++                if (_window.IsTransparency != supportTransparency)
++                {
++                    // Re-create the surface with correct alpha mode if the transparency support is not correct. This can happen when the transparency level is changed.
++                    _surface.Dispose();
++                    _surfaceInterop.Dispose();
++                    _drawingSurface.Dispose();
++
++                    CreateSurface(_window);
++
++                    // The _drawingSurface.Size != _size, so that require force resize to update the size of surface.
++                    forceResize = true;
++                }
++
+                 var size = _window.WindowInfo.Size;
+                 var scale = _window.WindowInfo.Scaling;
+                 _window.ResizeIfNeeded(size);
+@@ -133,7 +169,7 @@ public unsafe IDirect3D11TextureRenderTargetRenderSession BeginDraw()
+                 UnmanagedMethods.POINT off;
+                 try
+                 {
+-                    if (_size != size)
++                    if (forceResize || _size != size)
+                     {
+                         _surfaceInterop.Resize(new UnmanagedMethods.POINT
+                         {
+diff --git a/src/Windows/Avalonia.Win32/WindowImpl.cs b/src/Windows/Avalonia.Win32/WindowImpl.cs
+index cc2e7211f19..f6ae079e829 100644
+--- a/src/Windows/Avalonia.Win32/WindowImpl.cs
++++ b/src/Windows/Avalonia.Win32/WindowImpl.cs
+@@ -3,8 +3,10 @@
+ using System.ComponentModel;
+ using System.Diagnostics.CodeAnalysis;
+ using System.Linq;
++using System.Reflection.Emit;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
++
+ using Avalonia.Collections.Pooled;
+ using Avalonia.Controls;
+ using Avalonia.Controls.Platform;
+@@ -12,22 +14,24 @@
+ using Avalonia.Input.Platform;
+ using Avalonia.Input.Raw;
+ using Avalonia.Input.TextInput;
++using Avalonia.Logging;
+ using Avalonia.OpenGL.Egl;
+ using Avalonia.Platform;
+ using Avalonia.Platform.Surfaces;
+ using Avalonia.Platform.Storage;
++using Avalonia.Platform.Storage.FileIO;
+ using Avalonia.Rendering.Composition;
++using Avalonia.Threading;
+ using Avalonia.Win32.DirectX;
+ using Avalonia.Win32.Input;
+ using Avalonia.Win32.Interop;
+ using Avalonia.Win32.OpenGl;
+ using Avalonia.Win32.OpenGl.Angle;
+ using Avalonia.Win32.WinRT.Composition;
+-using static Avalonia.Win32.Interop.UnmanagedMethods;
+-using Avalonia.Platform.Storage.FileIO;
+-using Avalonia.Threading;
++
+ using static Avalonia.Controls.Win32Properties;
+-using Avalonia.Logging;
++using static Avalonia.Rendering.Composition.Animations.PropertySetSnapshot;
++using static Avalonia.Win32.Interop.UnmanagedMethods;
+ 
+ namespace Avalonia.Win32
+ {
+@@ -180,6 +184,7 @@ public WindowImpl()
+             _nativeControlHost = new Win32NativeControlHost(this, !UseRedirectionBitmap);
+             _defaultTransparencyLevel = UseRedirectionBitmap ? WindowTransparencyLevel.None : WindowTransparencyLevel.Transparent;
+             _transparencyLevel = _defaultTransparencyLevel;
++            SetTransparencyLevel(_transparencyLevel);
+ 
+             lock (s_instances)
+                 s_instances.Add(this);
+@@ -321,6 +326,7 @@ private set
+                 if (_transparencyLevel != value)
+                 {
+                     _transparencyLevel = value;
++                    SetTransparencyLevel(value);
+                     TransparencyLevelChanged?.Invoke(value);
+                 }
+             }
+@@ -372,6 +378,13 @@ private set
+ 
+         public void SetTransparencyLevelHint(IReadOnlyList<WindowTransparencyLevel> transparencyLevels)
+         {
++            if (transparencyLevels.Count == 1 && transparencyLevels[0] == WindowTransparencyLevel.None)
++            {
++                // Explicitly disable transparency. Ignore the UseRedirectionBitmap property.
++                TransparencyLevel = WindowTransparencyLevel.None;
++                return;
++            }
++
+             foreach (var level in transparencyLevels)
+             {
+                 if (!IsSupported(level))
+@@ -506,6 +519,11 @@ private unsafe bool SetUseHostBackdropBrush(bool useHostBackdropBrush)
+             return result == 0;
+         }
+ 
++        private void SetTransparencyLevel(WindowTransparencyLevel transparencyLevel)
++        {
++            CompositionEffectsSurface?.SetTransparencyLevel(transparencyLevel);
++        }
++
+         public IPlatformRenderSurface[] Surfaces
+             => _glSurface is null ?
+                 [(IPlatformRenderSurface)Handle, _framebuffer] :
